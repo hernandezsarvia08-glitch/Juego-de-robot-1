@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Robot Maze: Camino Libre</title>
+    <style>
+        body { background: #000; color: #fff; font-family: sans-serif; margin: 0; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        canvas { width: 100vw; height: 45vh; background: #000; border-bottom: 3px solid #0055ff; }
+        .hud { position: absolute; top: 10px; left: 10px; width: 45%; background: rgba(0,0,0,0.8); padding: 8px; border: 1px solid #0055ff; z-index: 10; font-size: 12px; }
+        #radar { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); color: #ff0; font-weight: bold; background: rgba(255,0,0,0.5); padding: 5px 15px; border-radius: 20px; display: none; z-index: 11; animation: blink 0.5s infinite; }
+        #minimap { position: absolute; top: 10px; right: 10px; width: 110px; height: 110px; background: #000; border: 2px solid #fff; z-index: 20; }
+        .controls { display: grid; grid-template-columns: repeat(3, 75px); gap: 15px; margin-top: 30px; }
+        .btn { width: 75px; height: 75px; background: #222; border: 2px solid #0055ff; color: #fff; font-size: 25px; display: flex; align-items: center; justify-content: center; user-select: none; touch-action: manipulation; border-radius: 10px; }
+        .btn:active { background: #0055ff; }
+        #alert { position: fixed; top: 40%; background: red; color: white; padding: 15px; font-weight: bold; display: none; z-index: 100; border: 2px solid white; text-align: center; width: 80%; left: 10%; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+    </style>
+</head>
+<body>
+
+    <canvas id="render"></canvas>
+    <canvas id="minimap"></canvas>
+    <div id="radar">⚠️ ENEMIGO CERCA ⚠️</div>
+    <div id="alert">¡SISTEMA REINICIADO!</div>
+
+    <div class="hud">
+        <span>NIVEL: <span id="lvlNum">1</span></span><br>
+        <span>TIEMPO: <span id="timer">0.00</span>s</span>
+    </div>
+
+    <div class="controls">
+        <div></div> <div class="btn" id="up">▲</div> <div></div>
+        <div class="btn" id="left">◀</div> <div class="btn" id="down">▼</div> <div class="btn" id="right">▶</div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('render');
+    const ctx = canvas.getContext('2d');
+    const mCanvas = document.getElementById('minimap');
+    const mCtx = mCanvas.getContext('2d');
+    const radar = document.getElementById('radar');
+    const alertMsg = document.getElementById('alert');
+
+    let world = [], rivals = [], p = { x: 1.5, y: 1.5, dir: 0, v: 0, rv: 0 };
+    let currentLevel = 1, gameActive = true, startTime = Date.now();
+
+    function generateMaze(size) {
+        let maze = Array(size).fill().map(() => Array(size).fill(1));
+        let stack = [[1, 1]];
+        maze[1][1] = 0;
+
+        // Generación de laberinto perfecta
+        while (stack.length > 0) {
+            let [cx, cy] = stack[stack.length - 1];
+            let neighbors = [];
+            [[0, -2], [0, 2], [-2, 0], [2, 0]].forEach(([dx, dy]) => {
+                let nx = cx + dx, ny = cy + dy;
+                if (nx > 0 && nx < size - 1 && ny > 0 && ny < size - 1 && maze[ny][nx] === 1) {
+                    neighbors.push([nx, ny, dx, dy]);
+                }
+            });
+            if (neighbors.length > 0) {
+                let [nx, ny, dx, dy] = neighbors[Math.floor(Math.random() * neighbors.length)];
+                maze[cy + dy / 2][cx + dx / 2] = 0;
+                maze[ny][nx] = 0;
+                stack.push([nx, ny]);
+            } else { stack.pop(); }
+        }
+
+        // META REAL (Verde) - Esquina inferior derecha
+        maze[size - 2][size - 2] = 2;
+
+        // TRAMPA NARANJA - Buscamos un callejón sin salida que NO sea la meta
+        let deadEnds = [];
+        for (let y = 1; y < size - 1; y++) {
+            for (let x = 1; x < size - 1; x++) {
+                if (maze[y][x] === 0 && (x !== size - 2 || y !== size - 2)) {
+                    let walls = 0;
+                    [[0, 1], [0, -1], [1, 0], [-1, 0]].forEach(([dx, dy]) => {
+                        if (maze[y + dy][x + dx] === 1) walls++;
+                    });
+                    if (walls === 3) deadEnds.push({x, y}); // Es un callejón
+                }
+            }
+        }
+
+        // Si hay callejones, ponemos la trampa en uno; si no, en cualquier pasillo lejos de la salida real
+        if (deadEnds.length > 0) {
+            let trap = deadEnds[Math.floor(Math.random() * deadEnds.length)];
+            maze[trap.y][trap.x] = 3;
+        } else {
+            maze[1][size-2] = 3; // Posición de respaldo segura
+        }
+
+        return maze;
+    }
+
+    function initLevel() {
+        if (currentLevel > 10) { alert("¡MÁQUINA COMPLETADA!"); location.reload(); return; }
+        let size = 11 + (currentLevel * 2);
+        if (size % 2 === 0) size++;
+        world = generateMaze(size);
+        p.x = 1.5; p.y = 1.5; p.v = 0; p.rv = 0; p.dir = 0;
+        document.getElementById('lvlNum').innerText = currentLevel;
+        
+        rivals = [];
+        let emptyForRivals = [];
+        for(let y=1; y<size-1; y++) {
+            for(let x=1; x<size-1; x++) {
+                if(world[y][x] === 0 && (x > 5 || y > 5)) emptyForRivals.push({x: x + 0.5, y: y + 0.5});
+            }
+        }
+        emptyForRivals.sort(() => Math.random() - 0.5);
+        for(let i=0; i < Math.min(currentLevel, 3); i++) { if(emptyForRivals[i]) rivals.push(emptyForRivals[i]); }
+    }
+
+    function triggerReset(msgText) {
+        alertMsg.innerText = msgText; alertMsg.style.display = 'block'; gameActive = false;
+        setTimeout(() => { alertMsg.style.display = 'none'; gameActive = true; initLevel(); loop(); }, 1200);
+    }
+
+    function drawMinimap() {
+        let s = mCanvas.width / world.length;
+        mCtx.fillStyle = "#000"; mCtx.fillRect(0,0,110,110);
+        for(let y=0; y<world.length; y++) {
+            for(let x=0; x<world[y].length; x++) {
+                if(world[y][x] === 1) { mCtx.fillStyle = "#444"; mCtx.fillRect(x*s, y*s, s, s); }
+                else if(world[y][x] === 2) { mCtx.fillStyle = "#0f0"; mCtx.fillRect(x*s, y*s, s, s); }
+                else if(world[y][x] === 3) { mCtx.fillStyle = "#f80"; mCtx.fillRect(x*s, y*s, s, s); }
+            }
+        }
+        mCtx.fillStyle = "#fff"; mCtx.fillRect(p.x*s-1, p.y*s-1, 3, 3);
+        mCtx.fillStyle = "#f00"; rivals.forEach(r => mCtx.fillRect(r.x*s-1, r.y*s-1, 2, 2));
+    }
+
+    function loop() {
+        if (!gameActive) return;
+        canvas.width = window.innerWidth; canvas.height = canvas.offsetHeight;
+        mCanvas.width = 110; mCanvas.height = 110;
+
+        let minDist = 10;
+        rivals.forEach(r => {
+            let angle = Math.atan2(p.y - r.y, p.x - r.x);
+            let speed = 0.008 + (currentLevel * 0.002);
+            let nx = r.x + Math.cos(angle)*speed, ny = r.y + Math.sin(angle)*speed;
+            if (world[Math.floor(ny)][Math.floor(nx)] === 0) { r.x = nx; r.y = ny; }
+            let d = Math.sqrt((p.x-r.x)**2 + (p.y-r.y)**2);
+            if (d < minDist) minDist = d;
+            if (d < 0.35) { triggerReset("¡TE ATRAPARON!"); return; }
+        });
+        radar.style.display = minDist < 2.5 ? 'block' : 'none';
+
+        let nx = p.x + Math.cos(p.dir)*p.v, ny = p.y + Math.sin(p.dir)*p.v;
+        let cell = world[Math.floor(ny)][Math.floor(nx)];
+        if (cell === 1) { p.v = 0; } 
+        else if (cell === 2) { currentLevel++; initLevel(); return; }
+        else if (cell === 3) { triggerReset("¡ESO ERA UNA TRAMPA!"); return; }
+        else { p.x = nx; p.y = ny; }
+        
+        p.dir += p.rv; p.v *= 0.85; p.rv *= 0.8;
+
+        ctx.fillStyle = "#000"; ctx.fillRect(0,0,canvas.width,canvas.height/2);
+        ctx.fillStyle = "#111"; ctx.fillRect(0,canvas.height/2,canvas.width,canvas.height/2);
+
+        const rays = 50, fov = 1.0, w = canvas.width / rays;
+        for(let i=0; i<rays; i++) {
+            let rayA = (p.dir - fov/2) + (i/rays) * fov;
+            let d = 0, hit = 0;
+            while(d < 12) {
+                d += 0.12;
+                let tx = Math.floor(p.x + Math.cos(rayA)*d), ty = Math.floor(p.y + Math.sin(rayA)*d);
+                if(world[ty][tx] > 0) { hit=world[ty][tx]; break; }
+            }
+            let h = canvas.height / (d * Math.cos(rayA - p.dir));
+            ctx.fillStyle = hit===1 ? `rgb(0,${50+d*10},${255-d*10})` : hit===2 ? "#0f0" : "#f80";
+            if(hit > 0) ctx.fillRect(i*w, (canvas.height-h)/2, w+1, h);
+        }
+
+        drawMinimap();
+        document.getElementById('timer').innerText = ((Date.now()-startTime)/1000).toFixed(2);
+        requestAnimationFrame(loop);
+    }
+
+    const setBtn = (id, v, rv) => {
+        const e = document.getElementById(id);
+        const start = (ev) => { ev.preventDefault(); p.v = v; p.rv = rv; };
+        const end = () => { p.v = 0; p.rv = 0; };
+        e.addEventListener('touchstart', start); e.addEventListener('touchend', end);
+        e.addEventListener('mousedown', start); e.addEventListener('mouseup', end);
+    };
+    setBtn('up', 0.12, 0); setBtn('down', -0.1, 0); setBtn('left', 0, -0.09); setBtn('right', 0, 0.09);
+    initLevel(); loop();
+</script>
+</body>
+</html>
+
